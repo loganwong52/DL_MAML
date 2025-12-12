@@ -2,7 +2,7 @@
 from __future__ import print_function
 import numpy as np
 import sys
-import tensorflow as tf
+# import tensorflow as tf
 try:
     import special_grads
 except KeyError as e:
@@ -11,6 +11,9 @@ except KeyError as e:
 
 from tensorflow.python.platform import flags
 from utils import mse, xent, conv_block, normalize
+
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior()
 
 FLAGS = flags.FLAGS
 
@@ -110,14 +113,16 @@ class MAML:
                 task_output = [task_outputa, task_outputbs, task_lossa, task_lossesb]
 
                 if self.classification:
-                    task_accuracya = tf.contrib.metrics.accuracy(tf.argmax(tf.nn.softmax(task_outputa), 1), tf.argmax(labela, 1))
+                    # task_accuracya = tf.contrib.metrics.accuracy(tf.argmax(tf.nn.softmax(task_outputa), 1), tf.argmax(labela, 1))
+                    task_accuracya = tf.reduce_mean(tf.cast(tf.equal(tf.argmax(tf.nn.softmax(task_outputa), 1), tf.argmax(labela, 1)), tf.float32))
                     for j in range(num_updates):
-                        task_accuraciesb.append(tf.contrib.metrics.accuracy(tf.argmax(tf.nn.softmax(task_outputbs[j]), 1), tf.argmax(labelb, 1)))
+                        # task_accuraciesb.append(tf.contrib.metrics.accuracy(tf.argmax(tf.nn.softmax(task_outputbs[j]), 1), tf.argmax(labelb, 1)))
+                        task_accuraciesb.append(tf.reduce_mean( tf.cast(tf.equal(tf.argmax(tf.nn.softmax(task_outputbs[j]), 1), tf.argmax(labelb, 1)), tf.float32) ))
                     task_output.extend([task_accuracya, task_accuraciesb])
 
                 return task_output
 
-            if FLAGS.norm is not 'None':
+            if FLAGS.norm != 'None':
                 # to initialize the batch norm vars, might want to combine this, and not run idx 0 twice.
                 unused = task_metalearn((self.inputa[0], self.inputb[0], self.labela[0], self.labelb[0]), False)
 
@@ -186,8 +191,10 @@ class MAML:
         weights = {}
 
         dtype = tf.float32
-        conv_initializer =  tf.contrib.layers.xavier_initializer_conv2d(dtype=dtype)
-        fc_initializer =  tf.contrib.layers.xavier_initializer(dtype=dtype)
+#         conv_initializer =  tf.contrib.layers.xavier_initializer_conv2d(dtype=dtype)
+#         fc_initializer =  tf.contrib.layers.xavier_initializer(dtype=dtype)
+        conv_initializer = tf.keras.initializers.GlorotUniform()
+        fc_initializer = tf.keras.initializers.GlorotUniform()
         k = 3
 
         weights['conv1'] = tf.get_variable('conv1', [k, k, self.channels, self.dim_hidden], initializer=conv_initializer, dtype=dtype)

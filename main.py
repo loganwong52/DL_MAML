@@ -29,11 +29,18 @@ import csv
 import numpy as np
 import pickle
 import random
-import tensorflow as tf
+# import tensorflow as tf
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior()
 
 from data_generator import DataGenerator
 from maml import MAML
 from tensorflow.python.platform import flags
+
+# To time it
+import time
+
+import os
 
 FLAGS = flags.FLAGS
 
@@ -113,6 +120,7 @@ def train(model, saver, sess, exp_string, data_generator, resume_itr=0):
             input_tensors.extend([model.summ_op, model.total_loss1, model.total_losses2[FLAGS.num_updates-1]])
             if model.classification:
                 input_tensors.extend([model.total_accuracy1, model.total_accuracies2[FLAGS.num_updates-1]])
+                # HERE, instead of recording loss, it is recording ACCURACY for the CLASSIFICATION task
 
         result = sess.run(input_tensors, feed_dict)
 
@@ -129,6 +137,7 @@ def train(model, saver, sess, exp_string, data_generator, resume_itr=0):
                 print_str = 'Iteration ' + str(itr - FLAGS.pretrain_iterations)
             print_str += ': ' + str(np.mean(prelosses)) + ', ' + str(np.mean(postlosses))
             print(print_str)
+            # NOTE: for classification, the mean "prelosses" and the mean "postlosses" are ACTUALLY ACCURACIES, not losses
             prelosses, postlosses = [], []
 
         if (itr!=0) and itr % SAVE_INTERVAL == 0:
@@ -156,7 +165,7 @@ def train(model, saver, sess, exp_string, data_generator, resume_itr=0):
 
             result = sess.run(input_tensors, feed_dict)
             print('Validation results: ' + str(result[0]) + ', ' + str(result[1]))
-
+    
     saver.save(sess, FLAGS.logdir + '/' + exp_string +  '/model' + str(itr))
 
 # calculated for omniglot
@@ -169,6 +178,7 @@ def test(model, saver, sess, exp_string, data_generator, test_num_updates=None):
     random.seed(1)
 
     metaval_accuracies = []
+    all_predictions = []
 
     for _ in range(NUM_TEST_POINTS):
         if 'generate' not in dir(data_generator):
@@ -193,6 +203,21 @@ def test(model, saver, sess, exp_string, data_generator, test_num_updates=None):
             result = sess.run([model.metaval_total_accuracy1] + model.metaval_total_accuracies2, feed_dict)
         else:  # this is for sinusoid
             result = sess.run([model.total_loss1] +  model.total_losses2, feed_dict)
+            
+            # Get preupdate predictions (predictions BEFORE adaptation)
+            preupdate_preds = sess.run(model.outputas, feed_dict)
+
+            # Get predictions at each adaptation step
+            predictions = sess.run(model.outputbs, feed_dict)
+
+            all_predictions.append({
+                'inputa': inputa, 'labela': labela,
+                'inputb': inputb, 'labelb': labelb,
+                'preupdate': preupdate_preds,
+                'predictions': predictions,
+                'amp': amp,
+                'phase': phase
+            })
         metaval_accuracies.append(result)
 
     metaval_accuracies = np.array(metaval_accuracies)
@@ -202,18 +227,57 @@ def test(model, saver, sess, exp_string, data_generator, test_num_updates=None):
 
     print('Mean validation accuracy/loss, stddev, and confidence intervals')
     print((means, stds, ci95))
+    
+    if FLAGS.datasource != 'sinusoid':
+        # mean ± Std. Error
+        standard_error = stds / np.sqrt(NUM_TEST_POINTS)
+        
+        # MAML Paper Accuracy percentage format:
+        print(f"Accuracy: {means[1]*100:.1f} ± {standard_error[1]*100:.1f}%")
+
+    print('All Predictions:')
+    print(len(all_predictions))
+    print(f"exp_string: {exp_string}")
 
     out_filename = FLAGS.logdir +'/'+ exp_string + '/' + 'test_ubs' + str(FLAGS.update_batch_size) + '_stepsize' + str(FLAGS.update_lr) + '.csv'
     out_pkl = FLAGS.logdir +'/'+ exp_string + '/' + 'test_ubs' + str(FLAGS.update_batch_size) + '_stepsize' + str(FLAGS.update_lr) + '.pkl'
+    
+    print(f"out_filename: {out_filename}")
+    print(f"out_pkl: {out_pkl}")
+
+    os.makedirs(os.path.dirname(out_filename), exist_ok=True)
+    os.makedirs(os.path.dirname(out_pkl), exist_ok=True)
+    
     with open(out_pkl, 'wb') as f:
         pickle.dump({'mses': metaval_accuracies}, f)
+        
     with open(out_filename, 'w') as f:
         writer = csv.writer(f, delimiter=',')
         writer.writerow(['update'+str(i) for i in range(len(means))])
         writer.writerow(means)
         writer.writerow(stds)
         writer.writerow(ci95)
+        
+    if len(all_predictions) > 0:
+        # Save to file
+        out_file = FLAGS.logdir + '/' + exp_string + '/' + 'test_ubs' + str(FLAGS.update_batch_size) + '_stepsize' + str(FLAGS.update_lr) +'/sine_predictions.pkl'
+        os.makedirs(os.path.dirname(out_file), exist_ok=True)
+        with open(out_file, 'wb') as f:
+            pickle.dump(all_predictions, f)
+        print("Saved all predictions")
 
+def convert(seconds):
+    seconds = seconds % (24 * 3600)
+    hour = seconds // 3600
+    seconds %= 3600
+    minutes = seconds // 60
+    seconds %= 60
+    return "%d:%02d:%02d" % (hour, minutes, seconds)
+
+
+
+    
+        
 def main():
     if FLAGS.datasource == 'sinusoid':
         if FLAGS.train:
@@ -305,15 +369,18 @@ def main():
         FLAGS.train_update_lr = FLAGS.update_lr
 
     exp_string = 'cls_'+str(FLAGS.num_classes)+'.mbs_'+str(FLAGS.meta_batch_size) + '.ubs_' + str(FLAGS.train_update_batch_size) + '.numstep' + str(FLAGS.num_updates) + '.updatelr' + str(FLAGS.train_update_lr)
-
+    
     if FLAGS.num_filters != 64:
         exp_string += 'hidden' + str(FLAGS.num_filters)
     if FLAGS.max_pool:
         exp_string += 'maxpool'
     if FLAGS.stop_grad:
         exp_string += 'stopgrad'
+    
     if FLAGS.baseline:
+        # adds 'oracle' or 'pretrained' to folder name         
         exp_string += FLAGS.baseline
+        
     if FLAGS.norm == 'batch_norm':
         exp_string += 'batchnorm'
     elif FLAGS.norm == 'layer_norm':
@@ -342,7 +409,17 @@ def main():
     if FLAGS.train:
         train(model, saver, sess, exp_string, data_generator, resume_itr)
     else:
+        print(f"MODEL FILE: {model_file}")
+        exp_string += "_eval"
         test(model, saver, sess, exp_string, data_generator, test_num_updates)
-
+        
+        
 if __name__ == "__main__":
+    start_time = time.time()
     main()
+    end_time = time.time()
+    
+    # Calculate run time
+    training_duration = end_time - start_time
+    time_in_minutes_and_seconds = convert(training_duration)
+    print(f"Time taken: {time_in_minutes_and_seconds}")
